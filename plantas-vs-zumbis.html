@@ -1,0 +1,266 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Plantas vs Zumbis</title>
+<style>
+  /* Estilos gerais da página e do painel superior */
+  body{margin:0;background:#1b2a1b;color:#fff;font-family:Arial,sans-serif;display:flex;flex-direction:column;align-items:center;padding:10px}
+  #bar{display:flex;gap:10px;align-items:center;margin-bottom:8px;flex-wrap:wrap;justify-content:center}
+  /* Cartas de seleção de plantas e ferramentas */
+  .card{border:3px solid #555;background:#3a4d2a;border-radius:8px;padding:6px 10px;cursor:pointer;text-align:center;user-select:none;min-width:90px}
+  .card.sel{border-color:#ffd400;background:#566d3a}
+  .card.off{opacity:.45}
+  /* Indicador de energia (sol) e tela do jogo */
+  #sun{font-size:20px;background:#222;padding:6px 14px;border-radius:8px;color:#ffd400;font-weight:bold}
+  canvas{background:#4a7a30;border:3px solid #222;max-width:100%;cursor:pointer}
+  button{padding:6px 12px;border-radius:6px;border:0;cursor:pointer;font-weight:bold}
+</style>
+</head>
+<body>
+<!-- Barra de interface: energia, cartas de unidades, contador e botão de reinício -->
+<div id="bar">
+  <div id="sun">☀ 100</div>
+  <div class="card" id="c0">🌱 Esrvilhadora<br>Custo 100</div>
+  <div class="card" id="c1">🌻 Girassol<br>Custo 50</div>
+  <div class="card" id="c2">⛏ Remover</div>
+  <div id="info">Onda: 0</div>
+  <button id="restart">Reiniciar</button>
+</div>
+<!-- Área de renderização do jogo -->
+<canvas id="cv" width="900" height="560"></canvas>
+<script>
+// Referência ao canvas e contexto de desenho 2D
+const cv=document.getElementById('cv'),ctx=cv.getContext('2d');
+// Constantes do tabuleiro (linhas, colunas, dimensões das células e deslocamento)
+const ROWS=5,COLS=9,CW=90,CH=100,OX=0,OY=60;
+// Custos de energia e tempos de recarga de cada planta
+const COST=[100,50],COOLDOWN=[5,5];
+// Variáveis de estado da partida
+let plants,zombies,peas,suns,sun,sel,time,spawnT,wave,over,won,cd,mouse,lastT,skyT;
+const TOTAL_ZOMBIES=30;
+let spawned;
+let mowers=[];
+
+// Reinicia todas as listas de entidades e variáveis para o estado inicial
+function init(){
+  plants=[];zombies=[];peas=[];suns=[];
+  sun=100;sel=0;time=0;spawnT=12;wave=0;over=false;won=false;cd=[0,0];
+  mouse={x:-1,y:-1};skyT=6;spawned=0;lastT=performance.now();
+  mowers=[];for(let r=0;r<ROWS;r++)mowers.push({r,x:-60,active:false,used:false});
+  updateUI();
+}
+
+// Atualiza os textos e o estado visual das cartas na barra superior
+function updateUI(){
+  document.getElementById('sun').textContent='☀ '+Math.floor(sun);
+  for(let i=0;i<3;i++){
+    const c=document.getElementById('c'+i);
+    c.classList.toggle('sel',sel===i);
+    c.classList.toggle('off',i<2&&(sun<COST[i]||cd[i]>0));
+  }
+  document.getElementById('info').textContent='Zumbis: '+spawned+'/'+TOTAL_ZOMBIES;
+}
+// Eventos de clique nos botões da interface
+[0,1,2].forEach(i=>document.getElementById('c'+i).onclick=()=>{sel=i;updateUI()});
+document.getElementById('restart').onclick=init;
+
+// Rastreia a posição do cursor no canvas
+cv.addEventListener('mousemove',e=>{const p=pos(e);mouse=p});
+
+// Gerencia cliques no canvas: coleta de sóis, plantio e remoção de plantas
+cv.addEventListener('click',e=>{
+  if(over)return;
+  const p=pos(e);
+  // Verifica se o clique atingiu algum sol disponível
+  for(let i=suns.length-1;i>=0;i--){
+    const s=suns[i];
+    if(Math.hypot(p.x-s.x,p.y-s.y)<28){sun+=25;suns.splice(i,1);updateUI();return}
+  }
+  // Calcula a linha e a coluna clicadas no gramado
+  const c=Math.floor((p.x-OX)/CW),r=Math.floor((p.y-OY)/CH);
+  if(c<0||c>=COLS||r<0||r>=ROWS)return;
+  const idx=plants.findIndex(pl=>pl.r===r&&pl.c===c);
+  // Remove a planta caso a ferramenta de remoção esteja selecionada
+  if(sel===2){if(idx>=0)plants.splice(idx,1);return}
+  // Posiciona uma nova planta se a célula estiver livre e houver recursos
+  if(idx>=0||sun<COST[sel]||cd[sel]>0)return;
+  sun-=COST[sel];cd[sel]=COOLDOWN[sel];
+  plants.push({type:sel,r,c,hp:100,t:sel===0?0:6});
+  updateUI();
+});
+
+// Converte as coordenadas do mouse na janela para coordenadas internas do canvas
+function pos(e){
+  const b=cv.getBoundingClientRect();
+  return{x:(e.clientX-b.left)*cv.width/b.width,y:(e.clientY-b.top)*cv.height/b.height};
+}
+
+// Atualiza a lógica e a física do jogo a cada quadro (frame)
+function update(dt){
+  time+=dt;
+  // Reduz o tempo de recarga das cartas
+  for(let i=0;i<2;i++)if(cd[i]>0)cd[i]=Math.max(0,cd[i]-dt);
+  // Gera sóis que caem do céu periodicamente
+  skyT-=dt;
+  if(skyT<=0){skyT=9;suns.push({x:60+Math.random()*(COLS*CW-120),y:-20,ty:OY+40+Math.random()*(ROWS*CH-100),life:10,sky:true})}
+  // Gera novos zumbis em intervalos progressivamente menores
+  spawnT-=dt;
+  if(spawnT<=0&&spawned<TOTAL_ZOMBIES){
+    spawned++;
+    const rate=Math.max(3,9-spawned*0.2);
+    spawnT=rate;
+    zombies.push({r:Math.floor(Math.random()*ROWS),x:COLS*CW+20,hp:100,eating:null,speed:14+Math.random()*4,hit:0});
+  }
+  // Executa a ação de cada planta (disparo de projéteis ou geração de energia)
+  for(const p of plants){
+    p.t-=dt;
+    if(p.type===0){
+      const has=zombies.some(z=>z.r===p.r&&z.x>p.c*CW);
+      if(has&&p.t<=0){p.t=1.4;peas.push({r:p.r,x:p.c*CW+CW-15})}
+    }else if(p.t<=0){
+      p.t=12;suns.push({x:p.c*CW+CW/2,y:OY+p.r*CH+CH/2,ty:OY+p.r*CH+CH-15,life:10,sky:false});
+    }
+  }
+  // Move os projéteis e verifica colisão com os zumbis da mesma fileira
+  for(let i=peas.length-1;i>=0;i--){
+    const b=peas[i];b.x+=300*dt;
+    const z=zombies.find(z=>z.r===b.r&&Math.abs(z.x-b.x)<20);
+    if(z){z.hp-=20;z.hit=.1;peas.splice(i,1)}
+    else if(b.x>cv.width)peas.splice(i,1);
+  }
+  // Atualiza a movimentação, o ataque dos zumbis e a condição de derrota
+  for(const z of zombies){
+    z.hit=Math.max(0,z.hit-dt);
+    const pl=plants.find(p=>p.r===z.r&&Math.abs((p.c*CW+CW/2)-z.x)<35);
+    if(pl){pl.hp-=25*dt;z.eating=pl}
+    else{z.eating=null;z.x-=z.speed*dt}
+    // Aciona o cortador de grama ou encerra o jogo caso o zumbi atravesse a defesa
+    if(z.x<OX-10){
+      const m=mowers[z.r];
+      if(!m.used){m.active=true;m.used=true}
+      else if(!m.active){over=true}
+    }
+  }
+  // Move os cortadores de grama ativos e elimina os zumbis no caminho
+  for(const m of mowers){
+    if(!m.active)continue;
+    m.x+=400*dt;
+    for(const z of zombies)if(z.r===m.r&&z.x<m.x+30)z.hp=0;
+    if(m.x>cv.width)m.active=false;
+  }
+  // Remove plantas e zumbis sem pontos de vida
+  plants=plants.filter(p=>p.hp>0);
+  zombies=zombies.filter(z=>z.hp>0);
+  // Atualiza a queda e o tempo de expiração dos sóis
+  for(let i=suns.length-1;i>=0;i--){
+    const s=suns[i];
+    if(s.y<s.ty)s.y=Math.min(s.ty,s.y+(s.sky?40:90)*dt);
+    else s.life-=dt;
+    if(s.life<=0)suns.splice(i,1);
+  }
+  // Verifica se todos os zumbis foram derrotados para declarar vitória
+  if(spawned>=TOTAL_ZOMBIES&&zombies.length===0)won=true;
+  updateUI();
+}
+
+// Renderiza o cenário, as entidades e as mensagens na tela
+function draw(){
+  ctx.clearRect(0,0,cv.width,cv.height);
+  // Cabeçalho interno do canvas
+  ctx.fillStyle='#2d4a1e';ctx.fillRect(0,0,cv.width,OY);
+  ctx.fillStyle='#fff';ctx.font='16px Arial';
+  ctx.fillText('Clique nos sóis para coletar. Proteja a casa à esquerda!',10,35);
+  // Desenha o gramado em padrão quadriculado
+  for(let r=0;r<ROWS;r++)for(let c=0;c<COLS;c++){
+    ctx.fillStyle=(r+c)%2?'#5a9a3a':'#4f8d31';
+    ctx.fillRect(OX+c*CW,OY+r*CH,CW,CH);
+  }
+  // Exibe a pré-visualização da planta na célula sob o cursor
+  const hc=Math.floor((mouse.x-OX)/CW),hr=Math.floor((mouse.y-OY)/CH);
+  if(hc>=0&&hc<COLS&&hr>=0&&hr<ROWS){
+    ctx.fillStyle='rgba(255,255,255,.25)';ctx.fillRect(hc*CW,OY+hr*CH,CW,CH);
+    if(sel<2){ctx.globalAlpha=.5;drawPlant(sel,hc*CW,OY+hr*CH);ctx.globalAlpha=1}
+  }
+  // Desenha os cortadores de grama na lateral esquerda
+  for(const m of mowers){
+    if(m.used&&!m.active)continue;
+    const y=OY+m.r*CH+CH/2;
+    ctx.fillStyle='#c33';ctx.fillRect(m.x+20,y-12,36,24);
+    ctx.fillStyle='#222';ctx.beginPath();ctx.arc(m.x+28,y+14,6,0,7);ctx.arc(m.x+50,y+14,6,0,7);ctx.fill();
+  }
+  // Desenha as plantas ativas e suas respectivas barras de vida
+  for(const p of plants){
+    drawPlant(p.type,p.c*CW,OY+p.r*CH);
+    ctx.fillStyle='#000';ctx.fillRect(p.c*CW+15,OY+p.r*CH+CH-8,60,4);
+    ctx.fillStyle='#4f4';ctx.fillRect(p.c*CW+15,OY+p.r*CH+CH-8,60*p.hp/100,4);
+  }
+  // Desenha os projéteis disparados
+  for(const b of peas){
+    ctx.fillStyle='#7f3';ctx.beginPath();ctx.arc(b.x,OY+b.r*CH+32,8,0,7);ctx.fill();
+    ctx.strokeStyle='#260';ctx.stroke();
+  }
+  // Desenha os zumbis e os sóis disponíveis
+  for(const z of zombies)drawZombie(z);
+  for(const s of suns){
+    ctx.fillStyle='#ffd400';ctx.beginPath();ctx.arc(s.x,s.y,22,0,7);ctx.fill();
+    ctx.strokeStyle='#f90';ctx.lineWidth=3;ctx.stroke();ctx.lineWidth=1;
+    ctx.fillStyle='#c80';ctx.font='bold 14px Arial';ctx.textAlign='center';ctx.fillText('25',s.x,s.y+5);ctx.textAlign='left';
+  }
+  // Exibe a tela sobreposta de vitória ou derrota ao fim da partida
+  if(over||won){
+    ctx.fillStyle='rgba(0,0,0,.7)';ctx.fillRect(0,0,cv.width,cv.height);
+    ctx.fillStyle='#fff';ctx.font='bold 48px Arial';ctx.textAlign='center';
+    ctx.fillText(won?'🎉 Você venceu!':'🧟 Os zumbis comeram seu cérebro!',cv.width/2,cv.height/2);
+    ctx.font='20px Arial';ctx.fillText('Clique em Reiniciar para jogar de novo',cv.width/2,cv.height/2+40);
+    ctx.textAlign='left';
+  }
+}
+
+// Desenha o modelo visual da planta de acordo com o tipo (0: Atiradora, 1: Girassol)
+function drawPlant(t,x,y){
+  const cx=x+CW/2,cy=y+CH/2;
+  ctx.fillStyle='#2a7a22';ctx.fillRect(cx-4,cy,8,32);
+  if(t===0){
+    ctx.fillStyle='#3c3';ctx.beginPath();ctx.arc(cx,cy-4,24,0,7);ctx.fill();
+    ctx.fillStyle='#2a2';ctx.fillRect(cx+14,cy-12,26,16);
+    ctx.beginPath();ctx.arc(cx+40,cy-4,9,0,7);ctx.fill();
+    ctx.fillStyle='#000';ctx.beginPath();ctx.arc(cx+4,cy-12,4,0,7);ctx.fill();
+  }else{
+    ctx.fillStyle='#ffb800';
+    for(let i=0;i<10;i++){const a=i*Math.PI/5;ctx.beginPath();ctx.arc(cx+Math.cos(a)*26,cy-6+Math.sin(a)*26,11,0,7);ctx.fill()}
+    ctx.fillStyle='#8a5a1a';ctx.beginPath();ctx.arc(cx,cy-6,19,0,7);ctx.fill();
+    ctx.fillStyle='#000';ctx.beginPath();ctx.arc(cx-6,cy-10,3,0,7);ctx.arc(cx+6,cy-10,3,0,7);ctx.fill();
+    ctx.beginPath();ctx.arc(cx,cy-2,6,0,Math.PI);ctx.stroke();
+  }
+}
+
+// Desenha o zumbi, sua animação de caminhada/ataque e sua barra de vida
+function drawZombie(z){
+  const x=z.x,y=OY+z.r*CH+CH/2,w=Math.sin(time*(z.eating?10:4))*3;
+  ctx.fillStyle=z.hit>0?'#fff':'#6a7a5a';
+  ctx.fillRect(x-14,y-16,28,44);
+  ctx.fillRect(x-12+w,y+28,10,18);ctx.fillRect(x+2-w,y+28,10,18);
+  ctx.fillStyle=z.hit>0?'#fff':'#8fa27a';
+  ctx.beginPath();ctx.arc(x,y-28,17,0,7);ctx.fill();
+  ctx.fillStyle='#8fa27a';ctx.fillRect(x-34,y-8+(z.eating?w:0),22,8);
+  ctx.fillStyle='#c00';ctx.beginPath();ctx.arc(x-6,y-30,3,0,7);ctx.arc(x+5,y-30,3,0,7);ctx.fill();
+  ctx.fillStyle='#000';ctx.fillRect(x-16,y-56,32,4);
+  ctx.fillStyle='#f44';ctx.fillRect(x-16,y-56,32*Math.max(0,z.hp)/100,4);
+}
+
+// Ciclo principal de execução contínua do jogo
+function loop(now){
+  const dt=Math.min(.05,(now-lastT)/1000);lastT=now;
+  if(!over&&!won)update(dt);
+  draw();
+  requestAnimationFrame(loop);
+}
+
+// Inicializa a partida e dispara o ciclo de animação
+init();
+requestAnimationFrame(loop);
+</script>
+</body>
+</html>
